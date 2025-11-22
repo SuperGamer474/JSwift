@@ -147,7 +147,7 @@ public final class ApplePye: NSObject {
         // call runPythonCode(code, id)
         // Note: we call evaluateJavaScript on the main thread
         DispatchQueue.main.async {
-            let js = "runPythonCode(\(jsonEncodeString(encoded)), '\(id)');"
+            let js = "runPythonCode(\(self.jsonEncodeString(encoded)), '\(id)');"
             self.webView.evaluateJavaScript(js) { (_, err) in
                 if let e = err {
                     self.completeWith(id: id, text: "/* ApplePye: JS eval error: \(e.localizedDescription) */")
