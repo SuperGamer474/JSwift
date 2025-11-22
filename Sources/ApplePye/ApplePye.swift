@@ -138,7 +138,7 @@ public final class ApplePye: NSObject {
         guard let jsonData = try? JSONSerialization.data(withJSONObject: [code], options: []),
               let jsonArrayStr = String(data: jsonData, encoding: .utf8),
               let jsStringLiteral = try? JSONSerialization.jsonObject(with: Data(jsonArrayStr.utf8), options: []) as? [String],
-              let encoded = jsStringLiteral?.first
+              let encoded = jsStringLiteral.first
         else {
             completeWith(id: id, text: "/* ApplePye: failed to encode code to JSON string */")
             return
