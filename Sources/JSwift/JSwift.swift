@@ -2,125 +2,150 @@ import WebKit
 import Foundation
 
 /// JSwift – run JavaScript with natural `returnToSwift value` syntax
+/// Supports both synchronous and async/await!
 public enum JSwift {
     private static let engine = JSEngine()
-
-    /// Execute JavaScript and get the value passed to `returnToSwift`
-    /// Works exactly like you expect: `let x = await JSwift.execute("…")`
-    public static func execute<T>(_ javascript: String) async -> T {
+    
+    // MARK: - Synchronous (blocks the thread until returnToSwift is called)
+    public static func execute<T>(_ js: String) -> T {
+        let semaphore = DispatchSemaphore(value: 0)
+        var result: T!
+        var error: Error?
+        
+        engine.evaluate(js) { res in
+            switch res {
+            case .success(let value):
+                result = value as? T ?? (value as! T) // force cast after type check
+            case .failure(let err):
+                error = err
+            }
+            semaphore.signal()
+        }
+        
+        semaphore.wait()
+        
+        if let error = error {
+            fatalError("JSwift JavaScript error: \(error.localizedDescription)")
+        }
+        return result
+    }
+    
+    // MARK: - Async/Await (non-blocking, modern Swift)
+    public static func executeAsync<T>(_ js: String) async -> T {
         await withCheckedContinuation { continuation in
-            engine.evaluate(javascript) { result in
+            engine.evaluate(js) { result in
                 switch result {
                 case .success(let value):
-                    // Safely cast – if it fails, we fall back to String representation
-                    if let casted = value as? T {
-                        continuation.resume(returning: casted)
-                    } else if let string = value as? String, let casted = string as? T {
-                        continuation.resume(returning: casted)
+                    if let value = value as? T {
+                        continuation.resume(returning: value)
                     } else {
-                        // Last resort: try JSON round-trip for complex objects
-                        if let data = try? JSONSerialization.data(withJSONObject: value, options: []),
+                        // Try JSON round-trip for complex objects
+                        if let data = try? JSONSerialization.data(withJSONObject: value),
                            let decoded = try? JSONDecoder().decode(T.self, from: data) {
                             continuation.resume(returning: decoded)
                         } else {
-                            fatalError("JSwift: Could not convert JS result to \(T.self). Got: \(value)")
+                            continuation.resume(throwing: NSError(domain: "JSwift", code: 1,
+                                                                  userInfo: [NSLocalizedDescriptionKey: "Type mismatch"]))
                         }
                     }
                 case .failure(let error):
-                    fatalError("JSwift JavaScript error: \(error)")
+                    continuation.resume(throwing: error)
                 }
             }
         }
     }
 }
 
-// MARK: - Private Engine (unchanged core, just cleaned up)
+// MARK: - Shared Engine
 
 private actor JSEngine {
     private let webView: WKWebView
-    private var continuations: [UUID: (Result<Any, Error>) -> Void] = [:]
-
+    private var callbacks: [UUID: (Result<Any, Error>) -> Void] = [:]
+    
     init() {
         let config = WKWebViewConfiguration()
         let controller = WKUserContentController()
-
-        // Magic: makes `returnToSwift value` work without parentheses
+        
         let bridgeScript = """
         (function() {
-            const callback = (value) => {
-                window.webkit.messageHandlers.jswift.postMessage({
+            const send = (value) => {
+                webkit.messageHandlers.jswift.postMessage({
                     id: window.__jswift_id,
                     value: value
                 });
             };
             Object.defineProperty(window, 'returnToSwift', {
-                set: callback,
+                set: send,
                 get: () => { throw new Error('returnToSwift is write-only') },
                 configurable: false
             });
         })();
         """
-
+        
         controller.addUserScript(WKUserScript(source: bridgeScript,
                                               injectionTime: .atDocumentStart,
                                               forMainFrameOnly: true))
         controller.add(SwiftMessageHandler(engine: self), name: "jswift")
         config.userContentController = controller
-
+        
         let wv = WKWebView(frame: .zero, configuration: config)
         wv.isHidden = true
         self.webView = wv
-
-        wv.loadHTMLString("", baseURL: nil)
+        wv.loadHTMLString("<html><body></body></html>", baseURL: nil)
     }
-
+    
     func evaluate(_ js: String, completion: @escaping (Result<Any, Error>) -> Void) {
         let id = UUID()
-        continuations[id] = completion
-
-        let wrapped = """
+        callbacks[id] = completion
+        
+        let wrappedJS = """
         (function() {
             window.__jswift_id = '\(id.uuidString)';
             try {
                 \(js)
             } catch (e) {
-                window.webkit.messageHandlers.jswift.postMessage({
+                webkit.messageHandlers.jswift.postMessage({
                     id: '\(id.uuidString)',
                     error: e.message || String(e)
                 });
             }
         })();
         """
-
-        webView.evaluateJavaScript(wrapped)
+        
+        webView.evaluateJavaScript(wrappedJS)
     }
-
-    func handle(id: UUID, value: Any) {
-        continuations[id]?(.success(value))
-        continuations.removeValue(forKey: id)
+    
+    func handleMessage(id: UUID, value: Any?) {
+        if let callback = callbacks.removeValue(forKey: id) {
+            callback(.success(value ?? NSNull()))
+        }
     }
-
-    func handle(id: UUID, error: String) {
-        continuations[id]?(.failure(NSError(domain: "JSwift", code: -1, userInfo: [NSLocalizedDescriptionKey: error])))
-        continuations.removeValue(forKey: id)
+    
+    func handleError(id: UUID, message: String) {
+        if let callback = callbacks.removeValue(forKey: id) {
+            callback(.failure(NSError(domain: "JSwift", code: -1,
+                                      userInfo: [NSLocalizedDescriptionKey: message])))
+        }
     }
 }
 
 private class SwiftMessageHandler: NSObject, WKScriptMessageHandler {
     weak var engine: JSEngine?
-
-    init(engine: JSEngine) { self.engine = engine }
-
+    
+    init(engine: JSEngine) {
+        self.engine = engine
+    }
+    
     func userContentController(_ userContentController: WKUserContentController,
                                didReceive message: WKScriptMessage) {
         guard let body = message.body as? [String: Any],
               let idString = body["id"] as? String,
               let id = UUID(uuidString: idString) else { return }
-
+        
         if let error = body["error"] as? String {
-            engine?.handle(id: id, error: error)
-        } else if let value = body["value"] {
-            engine?.handle(id: id, value: value)
+            engine?.handleError(id: id, message: error)
+        } else if body["value"] != nil || body["error"] == nil {
+            engine?.handleMessage(id: id, value: body["value"])
         }
     }
 }
