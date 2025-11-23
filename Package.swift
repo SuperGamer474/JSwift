@@ -1,18 +1,21 @@
-// swift-tools-version:5.6
+// swift-tools-version:5.9
 import PackageDescription
 
 let package = Package(
-    name: "ApplePye",
+    name: "JSwift",
     platforms: [
-        .iOS(.v14)
+        .iOS(.v13), .macCatalyst(.v13)
     ],
     products: [
-        .library(name: "ApplePye", targets: ["ApplePye"])
+        .library(
+            name: "JSwift",
+            targets: ["JSwift"]
+        ),
     ],
     targets: [
         .target(
-            name: "ApplePye",
-            path: "Sources/ApplePye"
-        )
+            name: "JSwift",
+            dependencies: []
+        ),
     ]
 )
