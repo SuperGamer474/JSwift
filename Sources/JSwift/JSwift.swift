@@ -6,7 +6,8 @@ public final class JSwift {
     private static let engine = JSEngine()
 
     // MARK: - Synchronous (blocks until returnToSwift is called)
-    public static func execute<T = Any>(_ js: String) -> T {
+    // Generic version (no default generic parameter)
+    public static func execute<T>(_ js: String) -> T {
         let semaphore = DispatchSemaphore(value: 0)
         var result: Any?
         var executionError: Error?
@@ -27,8 +28,15 @@ public final class JSwift {
             fatalError("JSwift JavaScript error: \(error.localizedDescription)")
         }
 
-        // Force-cast because the API is intentionally ergonomic; caller may request a concrete T.
+        // Force-cast to requested type T. Caller is responsible for using the correct T.
         return result as! T
+    }
+
+    // Non-generic overload that returns Any
+    // For callers who don't want to specify a generic parameter.
+    public static func execute(_ js: String) -> Any {
+        // Call the generic variant with explicit Any to avoid recursion/ambiguity.
+        return JSwift.execute<Any>(js)
     }
 
     // MARK: - Async/Await
