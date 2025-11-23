@@ -6,13 +6,12 @@ import Foundation
 public enum JSwift {
     private static let engine = JSEngine()
 
-    // MARK: - Synchronous (blocks until returnToSwift is called)
+    // MARK: - Synchronous (blocks the thread)
     public static func execute<T>(_ js: String) -> T {
         let semaphore = DispatchSemaphore(value: 0)
         var result: T!
         var thrownError: Error?
 
-        // Use Task + await to safely hop into the actor
         Task {
             do {
                 let value = try await engine.evaluate(js)
@@ -34,28 +33,30 @@ public enum JSwift {
     // MARK: - Async/Await
     public static func executeAsync<T: Decodable>(_ js: String) async throws -> T {
         let value = try await engine.evaluate(js)
-        
-        // If it's already the right type, return it
+
         if let value = value as? T {
             return value
         }
-        
-        // Otherwise, try JSON round-trip (for objects/arrays)
+
         let data = try JSONSerialization.data(withJSONObject: value)
         return try JSONDecoder().decode(T.self, from: data)
     }
 }
 
-// MARK: - Actor Engine
+// MARK: - Actor Engine (fixed initializer order)
 
 private actor JSEngine {
     private let webView: WKWebView
+    private let messageHandler: SwiftMessageHandler      // <-- stored reference so it lives
+
     private var pending: [UUID: CheckedContinuation<Any, Error>] = [:]
 
     init() {
+        // 1. Create configuration & controller first
         let config = WKWebViewConfiguration()
         let controller = WKUserContentController()
 
+        // 2. Inject the magic `returnToSwift` bridge
         let bridge = """
         (function() {
             const send = (value) => {
@@ -71,22 +72,32 @@ private actor JSEngine {
         })();
         """
 
-        controller.addUserScript(WKUserScript(source: bridge,
-                                              injectionTime: .atDocumentStart,
-                                              forMainFrameOnly: true))
-        controller.add(SwiftMessageHandler(engine: self), name: "jswift")
-        config.userContentController = controller
+        controller.addUserScript(
+            WKUserScript(source: bridge,
+                         injectionTime: .atDocumentStart,
+                         forMainFrameOnly: true)
+        )
 
+        // 3. Create the hidden web view
         let wv = WKWebView(frame: .zero, configuration: config)
         wv.isHidden = true
+
+        // 4. NOW we can safely create the message handler (uses `self`)
+        let handler = SwiftMessageHandler(engine: self)
+        controller.add(handler, name: "jswift")
+
+        // 5. Assign all stored properties – order matters!
         self.webView = wv
-        wv.loadHTMLString("<script> </script>", baseURL: nil)
+        self.messageHandler = handler
+
+        // 6. Load a tiny page so the JS context is ready
+        wv.loadHTMLString("<script></script>", baseURL: nil)
     }
 
     func evaluate(_ js: String) async throws -> Any {
-        return try await withCheckedThrowingContinuation { continuation in
+        try await withCheckedThrowingContinuation { cont in
             let id = UUID()
-            pending[id] = continuation
+            pending[id] = cont
 
             let wrapped = """
             (function() {
@@ -138,8 +149,8 @@ private class SwiftMessageHandler: NSObject, WKScriptMessageHandler {
               let idStr = body["id"] as? String,
               let id = UUID(uuidString: idStr) else { return }
 
-        if let error = body["error"] as? String {
-            engine?.handle(id: id, error: error)
+        if let err = body["error"] as? String {
+            engine?.handle(id: id, error: err)
         } else {
             engine?.handle(id: id, value: body["value"])
         }
